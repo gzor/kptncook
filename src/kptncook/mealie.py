@@ -196,8 +196,24 @@ class MealieApiClient:
 
     def upload_asset(self, recipe_slug, image: Image):
         # download image
-        r = httpx.get(image.url)
-        r.raise_for_status()
+        try:
+            r = httpx.get(image.url)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    f'Step image "{image.name}" not found online (404). Skipping image upload.'
+                )
+            else:
+                logger.warning(
+                    f'Failed to download step image "{image.name}": {exc.response.status_code}. Skipping image upload.'
+                )
+            return None
+        except Exception as exc:
+            logger.warning(
+                f'Error downloading step image "{image.name}": {exc}. Skipping image upload.'
+            )
+            return None
 
         download = io.BytesIO(r.content)
 
@@ -210,10 +226,16 @@ class MealieApiClient:
             "icon": "mdi-file-image",
             "extension": extension,
         }
-        r = self.post(
-            f"/recipes/{recipe_slug}/assets", data=data, files={"file": download}
-        )
-        r.raise_for_status()
+        try:
+            r = self.post(
+                f"/recipes/{recipe_slug}/assets", data=data, files={"file": download}
+            )
+            r.raise_for_status()
+        except Exception as exc:
+            logger.warning(
+                f'Failed to upload step image "{image.name}" to Mealie: {exc}. Skipping image upload.'
+            )
+            return None
 
         return r.json()
 
@@ -225,17 +247,21 @@ class MealieApiClient:
         assets = []
         for instruction in recipe.recipe_instructions:
             asset_properties = self.upload_asset(recipe.slug, instruction.image)
-            uploaded_image_name = asset_properties["fileName"]
-            instruction.text = self._build_recipestep_text(
-                recipe.id, instruction.text, uploaded_image_name
-            )
-            assets.append(
-                RecipeAsset(
-                    name=asset_properties["name"],
-                    icon=asset_properties["icon"],
-                    file_name=asset_properties["fileName"],
+            if asset_properties is not None:
+                uploaded_image_name = asset_properties["fileName"]
+                instruction.text = self._build_recipestep_text(
+                    recipe.id, instruction.text, uploaded_image_name
                 )
-            )
+                assets.append(
+                    RecipeAsset(
+                        name=asset_properties["name"],
+                        icon=asset_properties["icon"],
+                        file_name=asset_properties["fileName"],
+                    )
+                )
+            else:
+                # Image upload failed, continue without image
+                logger.info(f'Step image "{instruction.image.name}" could not be uploaded, continuing without image.')
         recipe.assets = assets
         return recipe
 
@@ -247,10 +273,24 @@ class MealieApiClient:
         return slug
 
     def _scrape_image_for_recipe(self, recipe, slug):
-        json_image_url = json.dumps({"url": recipe.image_url})
-        scrape_image_path = f"/recipes/{slug}/image"
-        r = self.post(scrape_image_path, data=json_image_url)
-        r.raise_for_status()
+        try:
+            json_image_url = json.dumps({"url": recipe.image_url})
+            scrape_image_path = f"/recipes/{slug}/image"
+            r = self.post(scrape_image_path, data=json_image_url)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    f'Main recipe image not found online (404) for recipe "{recipe.name}". Recipe will be created without main image.'
+                )
+            else:
+                logger.warning(
+                    f'Failed to download main recipe image for "{recipe.name}": {exc.response.status_code}. Recipe will be created without main image.'
+                )
+        except Exception as exc:
+            logger.warning(
+                f'Error downloading main recipe image for "{recipe.name}": {exc}. Recipe will be created without main image.'
+            )
 
     def _update_user_and_group_id(self, recipe, slug):
         recipe_detail_path = f"/recipes/{slug}"
